@@ -27,11 +27,18 @@ def _parse_bngl_text(bngl_text):
         obs_to_pattern: dict mapping observable name -> BNGL pattern
         seed_pattern_to_param: dict mapping seed species pattern -> parameter name
         simple_molecule_types: set of molecule type names with no internal states
+        counter_molecule_types: set of molecule type names WITH internal counter
+            states (e.g. "Growing_hook(flgE~0~1~2...)") -- added 2026-08-12 so
+            NFSimProcess can identify which species need exact-state
+            re-seeding (see SCAFFOLD STATE PERSISTENCE FIX below), as opposed
+            to simple_molecule_types, whose plain counts are already handled
+            via observables.
     """
     observable_names = []
     obs_to_pattern = {}
     seed_pattern_to_param = {}
     simple_molecule_types = set()
+    counter_molecule_types = set()
 
     # Parse observables block
     in_observables = False
@@ -81,8 +88,14 @@ def _parse_bngl_text(bngl_text):
             if '~' not in mol_type and mol_type.endswith('()'):
                 name = mol_type[:-2]
                 simple_molecule_types.add(name)
+            elif '~' in mol_type:
+                # Counter/scaffold type: Name(comp~0~1~2~...) -- name is
+                # everything before the first '('.
+                name = mol_type.split('(', 1)[0].strip()
+                counter_molecule_types.add(name)
 
-    return observable_names, obs_to_pattern, seed_pattern_to_param, simple_molecule_types
+    return (observable_names, obs_to_pattern, seed_pattern_to_param,
+            simple_molecule_types, counter_molecule_types)
 
 
 class NFSimProcess(Process):
@@ -95,8 +108,32 @@ class NFSimProcess(Process):
 
     Observables whose molecule types have no internal states (simple
     molecules) are "seedable" -- their counts carry over between steps.
-    Growing intermediates with counter states are not seedable and are
-    lost between steps.
+
+    SCAFFOLD STATE PERSISTENCE FIX (2026-08-12): growing intermediates with
+    counter states (e.g. a partially-assembled complex tracked as
+    Growing_X(subunit~N)) previously had NO representation that survived
+    between invocations at all -- each call built a fresh temp BNGL model,
+    seeded only from the plain-count `observables` state, and any
+    in-progress scaffold was silently reset to zero every time this Step
+    fired. For a multi-hundred-subunit assembly chain running under a short
+    per-interval budget, that made it structurally impossible for such a
+    reaction to ever complete, no matter how many total intervals were run
+    -- confirmed directly (v2ecoli flagella-cascade investigation,
+    2026-08-12): an isolated, unchunked run of one such reaction completed
+    1,904 times over one continuous simulation, while the SAME reaction
+    embedded in this Process's normal chunked operation completed 0 times
+    across 432 combined chunked intervals (~1.6M total reaction events).
+
+    Fixed by reading NFsim's own full end-of-run species list (the
+    `<model>.species` file BioNetGen/NFsim already writes, listing every
+    distinct species -- including every individual scaffold occupancy state
+    -- with its exact count) instead of relying only on the aggregate
+    `observables` block, and re-seeding ALL of it (not just the simple/
+    plain-count species) as exact BNGL seed species on the next call. This
+    is exposed as a new `scaffold_species` overwrite port (see inputs()/
+    outputs()) alongside the existing `observables` delta port -- growing
+    intermediates now persist exactly across steps, the same way ordinary
+    monomer counts already did.
     """
 
     config_schema = {
@@ -119,7 +156,8 @@ class NFSimProcess(Process):
         (self.observable_names,
          self.obs_to_pattern,
          self.seed_pattern_to_param,
-         self.simple_molecule_types) = _parse_bngl_text(self.bngl_template)
+         self.simple_molecule_types,
+         self.counter_molecule_types) = _parse_bngl_text(self.bngl_template)
 
         # Build seedability mapping for each observable
         # seedable_obs maps observable_name -> ('param', param_name) or ('add', pattern)
@@ -135,9 +173,14 @@ class NFSimProcess(Process):
                 if mol_name in self.simple_molecule_types:
                     self.seedable_obs[name] = ('add', pattern)
 
+        # Model's own basename, used to locate the .species file BNG writes
+        # alongside the temp .bngl file each run (added 2026-08-12).
+        self._model_basename = 'model'
+
     def initial_state(self):
         return {
             'observables': {name: 0.0 for name in self.observable_names},
+            'scaffold_species': {},
         }
 
     def inputs(self):
@@ -145,6 +188,7 @@ class NFSimProcess(Process):
             'observables': {
                 name: 'float' for name in self.observable_names
             },
+            'scaffold_species': 'map[float]',
         }
 
     def outputs(self):
@@ -152,7 +196,36 @@ class NFSimProcess(Process):
             'observables': {
                 name: 'float' for name in self.observable_names
             },
+            'scaffold_species': 'overwrite[map[float]]',
         }
+
+    def _parse_species_file(self, path):
+        """Parse a BNG-written .species file (added 2026-08-12).
+
+        Format (one per line, tab/space-separated, '#'-prefixed comments):
+            Growing_hook(flgE~45)  1
+            flagellar_hook()  1918
+        Returns dict: exact BNGL pattern -> count (int).
+        """
+        species = {}
+        if not os.path.exists(path):
+            return species
+        with open(path) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                parts = stripped.rsplit(None, 1)
+                if len(parts) != 2:
+                    continue
+                pattern, count_str = parts
+                try:
+                    count = int(float(count_str))
+                except ValueError:
+                    continue
+                if count > 0:
+                    species[pattern] = count
+        return species
 
     def update(self, state, interval):
         # Read current observable values
@@ -160,15 +233,22 @@ class NFSimProcess(Process):
             name: max(0, int(state['observables'].get(name, 0)))
             for name in self.observable_names
         }
+        # Exact scaffold-state population carried forward from the previous
+        # call (added 2026-08-12 -- see class docstring, SCAFFOLD STATE
+        # PERSISTENCE FIX). Keys are literal BNGL patterns as written by BNG
+        # itself in the .species file, e.g. "Growing_hook(flgE~45)".
+        incoming_scaffold = dict(state.get('scaffold_species') or {})
 
         # Skip if nothing to simulate
         total_seedable = sum(
             current[name] for name in self.observable_names
             if name in self.seedable_obs
         )
-        if total_seedable == 0:
+        total_scaffold = sum(incoming_scaffold.values())
+        if total_seedable == 0 and total_scaffold == 0:
             return {
                 'observables': {name: 0.0 for name in self.observable_names},
+                'scaffold_species': {},
             }
 
         # Build BNGL text with current state
@@ -195,6 +275,14 @@ class NFSimProcess(Process):
             if kind == 'add' and count > 0:
                 extra_seeds.append(f'    {ref}  {count}')
 
+        # Re-seed the EXACT incoming scaffold population (added 2026-08-12)
+        # -- one seed species line per distinct occupancy state, so
+        # partially-assembled complexes resume from exactly where the
+        # previous interval left them instead of resetting to zero.
+        for pattern, count in incoming_scaffold.items():
+            if count > 0:
+                extra_seeds.append(f'    {pattern}  {count}')
+
         if extra_seeds:
             bngl_text = bngl_text.replace(
                 'end seed species',
@@ -209,22 +297,42 @@ class NFSimProcess(Process):
 
         # Run NFSim
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_bngl = os.path.join(tmpdir, 'model.bngl')
+            tmp_bngl = os.path.join(tmpdir, f'{self._model_basename}.bngl')
             with open(tmp_bngl, 'w') as f:
                 f.write(bngl_text)
 
             result = bionetgen.run(tmp_bngl, out=tmpdir)
-            gdat = result['model']
+            gdat = result[self._model_basename]
 
-        # Compute deltas
+            # Read the full final species population (added 2026-08-12) --
+            # NFsim's own <model>.species file, listing every distinct
+            # species (including every scaffold occupancy state) with its
+            # exact count, not just the aggregate named observables.
+            species_path = os.path.join(tmpdir, f'{self._model_basename}.species')
+            final_species = self._parse_species_file(species_path)
+
+        # Compute observable deltas (unchanged from before this fix)
         deltas = {}
         for name in self.observable_names:
             initial = current.get(name, 0)
             final = float(gdat[name][-1]) if name in gdat.dtype.names else 0.0
             deltas[name] = final - initial
 
+        # New scaffold_species snapshot: every final-species entry whose
+        # molecule name is a counter/scaffold type (has internal states),
+        # keyed by its exact BNGL pattern. Simple/complete species are
+        # already covered by the observables/deltas mechanism above, so
+        # excluded here to avoid double-representing the same count in two
+        # different ports.
+        new_scaffold = {
+            pattern: float(count)
+            for pattern, count in final_species.items()
+            if pattern.split('(', 1)[0] in self.counter_molecule_types
+        }
+
         return {
             'observables': deltas,
+            'scaffold_species': new_scaffold,
         }
 
 
