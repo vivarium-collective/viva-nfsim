@@ -1,6 +1,6 @@
 """Composite-driven demo: load a *.composite.yaml, run it, render a report.
 
-Demonstrates the pbg-superpowers composite-spec convention end-to-end:
+Demonstrates the viva-superpowers composite-spec convention end-to-end:
 
     1. List composite specs shipped with the wrapper package.
     2. Load one by name; instantiate a process_bigraph.Composite via the
