@@ -9,7 +9,7 @@ Two flavors of composite construction live in this package:
    experiments.
 
 2. **Declarative `*.composite.yaml`** — sibling files in this directory
-   follow the pbg-superpowers composite-spec convention.
+   follow the viva-superpowers composite-spec convention.
    `build_composite()` loads one by name and instantiates
    `process_bigraph.Composite` with parameter substitution. The
    dashboard's composite explorer discovers these automatically once
@@ -183,7 +183,7 @@ def register_nfsim(core=None):
         from pbg_nfsim.visualizations import FlagellaAssemblyPlots
         core.register_link('FlagellaAssemblyPlots', FlagellaAssemblyPlots)
     except ImportError:
-        # pbg-superpowers not installed; viz composites won't work but
+        # viva-superpowers not installed; viz composites won't work but
         # the rest of the package still does.
         pass
     return core
