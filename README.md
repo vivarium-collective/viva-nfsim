@@ -1,10 +1,10 @@
-# pbg-nfsim
+# viva-nfsim
 
 Process-bigraph wrapper for [BioNetGen](https://bionetgen.org/)/[NFSim](https://github.com/RuleWorld/nfsim) rule-based simulations.
 
 Wraps NFSim network-free stochastic simulation as composable process-bigraph Processes. Includes a flagella assembly model demonstrating hierarchical complexation of ~30 proteins through 7 sequential reactions (237 rules), with standalone and composed workflow configurations.
 
-**[View Interactive Demo Report](https://vivarium-collective.github.io/pbg-nfsim/)** — flagella assembly with standalone complexation, composed steady production, and fast production (3x rate) configurations, including Plotly time series and bigraph architecture diagrams.
+**[View Interactive Demo Report](https://vivarium-collective.github.io/viva-nfsim/)** — flagella assembly with standalone complexation, composed steady production, and fast production (3x rate) configurations, including Plotly time series and bigraph architecture diagrams.
 
 ## Installation
 
