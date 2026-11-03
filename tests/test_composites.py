@@ -88,3 +88,24 @@ def test_register_nfsim_reraises_unrelated_import_errors(monkeypatch):
     monkeypatch.setattr(builtins, '__import__', failing_import)
     with pytest.raises(ModuleNotFoundError, match='numpy'):
         register_nfsim()
+
+
+def test_register_nfsim_reraises_missing_viva_submodule(monkeypatch):
+    """Regression: only a missing viva_superpowers package is skippable. A
+    missing submodule of an installed viva_superpowers must surface."""
+    import builtins
+
+    from pbg_nfsim.composites import register_nfsim
+
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == 'pbg_nfsim.visualizations':
+            raise ModuleNotFoundError(
+                "No module named 'viva_superpowers.visualization'",
+                name='viva_superpowers.visualization')
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', failing_import)
+    with pytest.raises(ModuleNotFoundError, match='viva_superpowers.visualization'):
+        register_nfsim()

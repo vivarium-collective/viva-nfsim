@@ -18,6 +18,7 @@ Two flavors of composite construction live in this package:
 Both flavors are equivalent — pick the one that fits your use case.
 """
 from __future__ import annotations
+import importlib.util
 import re
 from pathlib import Path
 from typing import Any
@@ -185,7 +186,10 @@ def register_nfsim(core=None):
     try:
         from pbg_nfsim.visualizations import FlagellaAssemblyPlots
     except ModuleNotFoundError as exc:
-        if exc.name is None or not exc.name.startswith('viva_superpowers'):
+        # find_spec returns None when the package is absent or blocked in
+        # sys.modules; an installed package with a missing submodule must raise.
+        viva_absent = importlib.util.find_spec('viva_superpowers') is None
+        if not (viva_absent and (exc.name or '').startswith('viva_superpowers')):
             raise
         # viva-superpowers not installed: viz composites are unavailable,
         # the rest of the package works.
